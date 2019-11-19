@@ -1,268 +1,100 @@
 {
-  "Comment": "A state machine for spinning up an EMR cluster to run a set of steps sequentially (i.e. steps will always be run in given order, no dynamic path for which steps to execute).",
+  "Comment": "An example of the Amazon States Language using a parallel state to execute two branches at the same time.  Will check for forecaster_seg every 15 minutes for 3 hours after starting state machine execution.  Necessary Input Parameters: {'S3Bucket': 'String', 'S3Key': 'String', 'segment-counts-input': {'Name': 'String', CLUSTER_CONFIGS}, 'id-analytics-input': {'Name': 'String', CLUSTER_CONFIGS} }",
   "StartAt": "Setup",
   "States": {
     "Setup": {
-      "Comment": "Makes sure that the necessary inputs are set up in the proper way to run the EMR pipeline.",
-      "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:849776797214:function:emr-pipe-setup",
-      "Next": "Spin Up Cluster"
+      "Type": "Pass",
+      "Result": {
+        "checkNumber": 0
+      },
+      "ResultPath": "$.setup",
+      "Next": "Check forecaster_seg"
     },
-    "Spin Up Cluster": {
-      "Comment": "Spins up the EMR Cluster.",
+    "Check forecaster_seg": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:849776797214:function:emr-cluster-create",
-      "Next": "Parallel Split"
+      "Resource": "arn:aws:lambda:us-east-1:849776797214:function:check-s3-file-exists",
+      "Next": "Continue?"
     },
-    "Parallel Split": {
+    "Continue?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.fileExists",
+          "BooleanEquals": true,
+          "Next": "Parallel"
+        },
+        {
+          "Variable": "$.fileExists",
+          "BooleanEquals": false,
+          "Next": "Checks Count"
+        }
+      ]
+    },
+    "Wait": {
+      "Type": "Wait",
+      "Seconds": 900,
+      "Next": "Check forecaster_seg"
+    },
+    "Checks Count": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.setup.checkNumber",
+          "NumericLessThan": 13,
+          "Next": "Update checkNumber"
+        }
+      ],
+      "Default": "forecaster_seg not updated"
+    },
+    "Update checkNumber": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:849776797214:function:datapipeline-update-checkNumber",
+      "Next": "Wait"
+    },
+    "forecaster_seg not updated": {
+      "Type": "Pass",
+      "Result": "No updated forecaster_seg found. Stopping job.",
+      "End": true
+    },
+    "Parallel": {
       "Type": "Parallel",
+      "Next": "Successfully Triggered EMR Jobs",
       "Branches": [
         {
-          "StartAt": "Wait for Cluster to Spin Up",
+          "StartAt": "Run Id-Analytics",
           "States": {
-            "Job Failure - Stop Job": {
-              "Comment": "This step triggers if something fails and the job should stop.",
-              "Type": "Fail",
-              "Cause": "There was a failure"
-            },
-            "Wait for Cluster to Spin Up": {
-              "Comment": "Waits for cluster to spin up.",
-              "Type": "Wait",
-              "Seconds": 60,
-              "Next": "Check Cluster Status"
-            },
-            "Check Cluster Status": {
-              "Comment": "Checks on cluster status.",
+            "Run Id-Analytics": {
               "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:check-cluster-status",
-              "Next": "Is Cluster Up?"
-            },
-            "Is Cluster Up?": {
-              "Comment": "Checks if the cluster is up before moving on.",
-              "Type": "Choice",
-              "Choices": [
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "WAITING",
-                  "Next": "Add Step"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATED",
-                  "Next": "Cluster Terminating"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATED_WITH_ERRORS",
-                  "Next": "Cluster Terminating"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATING",
-                  "Next": "Cluster Terminating"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "STARTING",
-                  "Next": "Wait for Cluster to Spin Up"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "BOOTSTRAPPING",
-                  "Next": "Wait for Cluster to Spin Up"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "RUNNING",
-                  "Next": "Wait for Cluster to Spin Up"
+              "Resource": "arn:aws:states:::states:startExecution",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:us-east-1:849776797214:stateMachine:datapipeline-emr-pipe",
+                "Input": {
+                  "emr-configs-input.$": "$.id-analytics-input"
                 }
-              ],
-              "Default": "Job Failure - Stop Job"
-            },
-            "Add Step": {
-              "Comment": "Add the step to run the main job.",
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:emr-add-step",
-              "Next": "Wait for Step to Run"
-            },
-            "Wait for Step to Run": {
-              "Comment": "Waits for the Env Config step to complete.",
-              "Type": "Wait",
-              "Seconds": 20,
-              "Next": "Check Step Status"
-            },
-            "Check Step Status": {
-              "Comment": "Checks on the cluster step status.",
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:check-emr-job-status",
-              "Next": "Is Step Done?"
-            },
-            "Is Step Done?": {
-              "Comment": "Checks if the env config step has run before moving on.",
-              "Type": "Choice",
-              "Choices": [
-                {
-                  "Variable": "$.StepStatus",
-                  "StringEquals": "COMPLETED",
-                  "Next": "Increment and Check Step Number"
-                },
-                {
-                  "Variable": "$.StepStatus",
-                  "StringEquals": "FAILED",
-                  "Next": "Step Error - Terminate Cluster"
-                },
-                {
-                  "Variable": "$.StepStatus",
-                  "StringEquals": "INTERRUPTED",
-                  "Next": "Step Error - Terminate Cluster"
-                },
-                {
-                  "Variable": "$.StepStatus",
-                  "StringEquals": "CANCELLED",
-                  "Next": "Step Error - Terminate Cluster"
-                },
-                {
-                  "Variable": "$.StepStatus",
-                  "StringEquals": "CANCEL_PENDING",
-                  "Next": "Step Error - Terminate Cluster"
-                },
-                {
-                  "Variable": "$.StepStatus",
-                  "StringEquals": "PENDING",
-                  "Next": "Wait for Step to Run"
-                },
-                {
-                  "Variable": "$.StepStatus",
-                  "StringEquals": "RUNNING",
-                  "Next": "Wait for Step to Run"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATING",
-                  "Next": "Cluster Terminating"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATED",
-                  "Next": "Cluster Terminating"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATED_WITH_ERRORS",
-                  "Next": "Cluster Terminating"
-                }
-              ],
-              "Default": "Step Error - Terminate Cluster"
-            },
-            "Cluster Terminating": {
-              "Type": "Pass",
-              "Next": "Job Failure - Stop Job"
-            },
-            "Increment and Check Step Number": {
-              "Comment": "Runs a lambda function to increment the value for the current step and checks if there are more steps to run.",
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:increment-step-number",
-              "Next": "More Steps?"
-            },
-            "More Steps?": {
-              "Comment": "Chooses path depending on if there are more steps to run.",
-              "Type": "Choice",
-              "Choices": [
-                {
-                  "Variable": "$.noMoreSteps",
-                  "BooleanEquals": false,
-                  "Next": "Add Step"
-                },
-                {
-                  "Variable": "$.noMoreSteps",
-                  "BooleanEquals": true,
-                  "Next": "Job Successful - Terminate Job Flow"
-                }
-              ]
-            },
-            "Step Error - Terminate Cluster": {
-              "Comment": "In the case of an unwanted action in a step, terminates the cluster before stopping the job.",
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:terminate-emr-cluster",
-              "Next": "Job Failure - Stop Job"
-            },
-            "Job Successful - Terminate Job Flow": {
-              "Comment": "Terminates the EMR Cluster once the job is complete.",
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:terminate-emr-cluster",
+              },
               "End": true
             }
           }
         },
         {
-          "StartAt": "Check Timeout Lambda",
+          "StartAt": "Run Segment-Counts",
           "States": {
-            "Check Timeout Lambda": {
+            "Run Segment-Counts": {
               "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:check-emr-timeout",
-              "Next": "Check Status of Cluster"
-            },
-            "Check Status of Cluster": {
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:check-cluster-status",
-              "Next": "Continue?"
-            },
-            "Continue?": {
-              "Type": "Choice",
-              "Choices": [
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATED",
-                  "Next": "Cluster Terminated - Stop Job"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATING",
-                  "Next": "Cluster Terminated - Stop Job"
-                },
-                {
-                  "Variable": "$.ClusterStatus",
-                  "StringEquals": "TERMINATED_WITH_ERRORS",
-                  "Next": "Cluster Terminated - Stop Job"
+              "Resource": "arn:aws:states:::states:startExecution",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:us-east-1:849776797214:stateMachine:datapipeline-emr-pipe",
+                "Input": {
+                  "emr-configs-input.$": "$.segment-counts-input"
                 }
-              ],
-              "Default": "Has Job Timed Out?"
-            },
-            "Has Job Timed Out?": {
-              "Type": "Choice",
-              "Choices": [
-                {
-                  "Variable": "$.hasClusterTimedOut",
-                  "BooleanEquals": true,
-                  "Next": "Job Timeout - Terminate Cluster"
-                },
-                {
-                  "Variable": "$.hasClusterTimedOut",
-                  "BooleanEquals": false,
-                  "Next": "Wait State"
-                }
-              ]
-            },
-            "Wait State": {
-              "Type": "Wait",
-              "Seconds": 60,
-              "Next": "Check Timeout Lambda"
-            },
-            "Job Timeout - Terminate Cluster": {
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:849776797214:function:terminate-emr-cluster",
-              "Next": "Cluster Terminated - Stop Job"
-            },
-            "Cluster Terminated - Stop Job": {
-              "Type": "Pass",
+              },
               "End": true
             }
           }
         }
-      ],
-      "Next": "Parallel Run Complete"
+      ]
     },
-    "Parallel Run Complete": {
+    "Successfully Triggered EMR Jobs": {
       "Type": "Succeed"
     }
   }
