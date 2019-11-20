@@ -1,6 +1,5 @@
 import boto3
 
-# This function is coming directly from the S3 Bucket
 def lambda_handler(event, context):
     s3 = boto3.resource('s3')
     bucket = s3.Bucket(event['S3Bucket'])
